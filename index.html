@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>地球仪 · 纯净版</title>
+<style>
+  :root{--bg:#070a0c;--ink:#ece9e1;--muted:#8c9a9b;--mint:#a8e6d2;--line:rgba(211,226,222,.16);}
+  *{box-sizing:border-box}
+  html,body{margin:0;height:100%;background:var(--bg);color:var(--ink);font-family:sans-serif;overflow:hidden;-webkit-user-select:none;user-select:none;}
+  #globe{position:fixed;inset:0;width:100%;height:100%;display:block;touch-action:none;cursor:grab;outline:none;}
+  #error-box{display:none;position:fixed;top:10%;left:5%;right:5%;background:rgba(200,50,50,.95);color:#fff;padding:15px;border-radius:8px;z-index:9999;font-size:13px;line-height:1.6;box-shadow:0 4px 12px rgba(0,0,0,.5);}
+  .hint{position:fixed;top:max(14px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);font-size:12px;color:rgba(168,230,210,.6);pointer-events:none;z-index:5;}
+  .ui{position:fixed;left:10px;right:10px;bottom:max(12px,env(safe-area-inset-bottom));display:flex;flex-wrap:wrap;gap:8px;justify-content:center;z-index:10;}
+  .btn{display:inline-flex;align-items:center;justify-content:center;height:36px;padding:0 14px;border:1px solid var(--line);background:rgba(7,10,12,.85);color:var(--ink);font-size:13px;cursor:pointer;border-radius:4px;backdrop-filter:blur(8px);}
+  .btn:active{background:rgba(168,230,210,.2)}
+  .btn.is-on{background:rgba(168,230,210,.15);border-color:var(--mint);color:var(--mint)}
+  .btn-primary{background:var(--mint);color:#07100e;border-color:var(--mint);font-weight:bold;}
+  .modal-bg{position:fixed;inset:0;z-index:100;display:flex;align-items:center;justify-content:center;padding:20px;background:rgba(0,0,0,.8);backdrop-filter:blur(5px);}
+  .modal-bg[hidden]{display:none}
+  .modal{background:#0a1012;border:1px solid var(--line);border-radius:6px;width:100%;max-width:400px;padding:20px;}
+  .modal h3{margin:0 0 8px;font-weight:400;font-size:16px;}
+  .modal .sub{margin:0 0 16px;font-size:12px;color:var(--muted);line-height:1.5;}
+  .field{display:flex;flex-direction:column;gap:6px;margin-bottom:16px;}
+  .field span{font-size:12px;color:var(--muted);}
+  .field input{height:36px;padding:0 10px;border:1px solid var(--line);background:#070a0c;color:#fff;border-radius:4px;}
+  .row{display:flex;gap:10px;}
+  .row .field{flex:1;}
+  .actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px;padding-top:16px;border-top:1px solid var(--line);}
+  .presets{display:flex;gap:8px;margin-bottom:16px;}
+  .presets button{padding:4px 10px;background:none;border:1px solid var(--line);color:var(--muted);border-radius:4px;}
+</style>
+</head>
+<body>
+
+<div id="error-box"></div>
+<canvas id="globe" tabindex="0"></canvas>
+
+<div class="hint">拖动旋转 · 双指缩放 · 双击回正</div>
+
+<div class="ui">
+  <button class="btn layer-btn is-on" data-layer="default" type="button">默认</button>
+  <button class="btn layer-btn" data-layer="coast" type="button">海岸线</button>
+  <button class="btn layer-btn" data-layer="land" type="button">陆地</button>
+  <button class="btn is-on" id="gridToggle" type="button">经纬网</button>
+  <button class="btn" id="gridResBtn" type="button">网格 15°</button>
+  <button class="btn" id="lightBtn" type="button">光影</button>
+  <label class="btn" for="fileInput">导入贴图</label>
+  <input type="file" id="fileInput" accept="image/*" hidden>
+  <button class="btn" id="exportBtn" type="button">导出</button>
+  <button class="btn" id="homeBtn" type="button">回正</button>
+</div>
+
+<div class="modal-bg" id="exportModal" hidden>
+  <div class="modal">
+    <h3>导出地图</h3>
+    <p class="sub">可将陆地、海岸线导出为图片，再通过“导入贴图”实现完全离线浏览。</p>
+    <div class="row">
+      <label class="field"><span>宽度</span><input id="expW" type="number" value="4096" step="128"></label>
+      <label class="field"><span>高度</span><input id="expH" type="number" value="2048" step="64"></label>
+    </div>
+    <div class="presets">
+      <button type="button" data-w="2048" data-h="1024">2K</button>
+      <button type="button" data-w="4096" data-h="2048">4K</button>
+      <button type="button" data-w="8192" data-h="4096">8K</button>
+    </div>
+    <div style="margin-bottom:16px;">
+      <label style="font-size:13px;display:flex;align-items:center;gap:8px;">
+        <input id="expGrid" type="checkbox" checked> 包含经纬网
+      </label>
+    </div>
+    <div class="actions">
+      <button class="btn" id="emCancel" type="button">取消</button>
+      <button class="btn btn-primary" id="emExport" type="button">下载 PNG</button>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/d3@7.9.0/dist/d3.min.js"></script>
+
+<script>
+(function() {
+  const errBox = document.getElementById('error-box');
+  if (typeof THREE === 'undefined' || typeof d3 === 'undefined') {
+    errBox.style.display = 'block';
+    errBox.innerHTML = '<b>加载失败</b><br>底层库未加载。请联网刷新页面，或将此文件放在支持网络的服务器上。';
+    return;
+  }
+
+  const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+  const canvas = document.getElementById('globe');
+  
+  const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  if (THREE.sRGBEncoding) renderer.outputEncoding = THREE.sRGBEncoding;
+  
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x070a0c);
+  const FOV = 40;
+  const camera = new THREE.PerspectiveCamera(FOV, 1, 0.1, 100);
+  
+  const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+  const sunLight = new THREE.DirectionalLight(0xffffff, 0.9);
+  sunLight.position.set(-2, 1.5, 3);
+  scene.add(ambientLight, sunLight);
+  
+  const R = 1;
+  const geo = new THREE.SphereGeometry(R, 128, 80);
+  
+  const matBasic = new THREE.MeshBasicMaterial();
+  const matPhong = new THREE.MeshPhongMaterial({ shininess: 2 });
+  
+  const earthBase = new THREE.Mesh(geo, matBasic);
+  scene.add(earthBase);
+  
+  const gridGeo = new THREE.SphereGeometry(R * 1.001, 128, 80);
+  const gridMat = new THREE.MeshBasicMaterial({ transparent: true, depthWrite: false });
+  const earthGrid = new THREE.Mesh(gridGeo, gridMat);
+  earthGrid.renderOrder = 1;
+  scene.add(earthGrid);
+  
+  const HOME = new THREE.Quaternion().setFromEuler(new THREE.Euler(0, Math.PI * 0.9, 0));
+  earthBase.quaternion.copy(HOME);
+  earthGrid.quaternion.copy(HOME);
+
+  let useLight = false;
+  let showGrid = true;
+  const gridSteps = [30, 22.5, 18, 15, 10, 5];
+  let gridIndex = 3; 
+  let currentLayer = 'default';
+  const cache = {};
+
+  // 绘制高精度底图
+  function renderBaseEquirect(geojson, W, H, mode) {
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#142228'; 
+    ctx.fillRect(0, 0, W, H);
+    
+    const proj = d3.geoEquirectangular().fitSize([W, H], {type: 'Sphere'});
+    const path = d3.geoPath(proj, ctx);
+    const lw = Math.max(0.8, W / 2048);
+
+    if (geojson) {
+      if (mode === 'land') {
+        ctx.beginPath(); path(geojson);
+        ctx.fillStyle = '#2b4144'; ctx.fill();
+      }
+      ctx.beginPath(); path(geojson);
+      ctx.strokeStyle = 'rgba(168,230,210,.85)';
+      ctx.lineWidth = lw; ctx.stroke();
+    }
+    return c;
+  }
+
+  // 绘制超高精度细线网格（固定 1 像素极细）
+  function renderGridEquirect(W, H, step) {
+    const c = document.createElement('canvas');
+    c.width = W; c.height = H;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, W, H);
+    
+    ctx.beginPath();
+    for (let lon = -180; lon <= 180; lon += step) {
+      const x = (lon + 180) / 360 * W;
+      ctx.moveTo(x, 0); ctx.lineTo(x, H);
+    }
+    for (let lat = -90 + step; lat <= 90 - step; lat += step) {
+      const y = (90 - lat) / 180 * H;
+      ctx.moveTo(0, y); ctx.lineTo(W, y);
+    }
+    // 强制 1px 极细线，无论怎么放大，接近矢量质感
+    ctx.strokeStyle = 'rgba(168,230,210,0.7)';
+    ctx.lineWidth = 1; 
+    ctx.stroke();
+    return c;
+  }
+
+  function updateBaseTexture() {
+    if (currentLayer === 'custom') return; 
+    const gj = currentLayer === 'default' ? null : cache[currentLayer];
+    const cimg = renderBaseEquirect(gj, 4096, 2048, currentLayer);
+    const tex = new THREE.CanvasTexture(cimg);
+    if (THREE.sRGBEncoding) tex.encoding = THREE.sRGBEncoding;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    if (matBasic.map) matBasic.map.dispose();
+    if (matPhong.map) matPhong.map.dispose();
+    matBasic.map = tex; matPhong.map = tex;
+    matBasic.needsUpdate = true; matPhong.needsUpdate = true;
+  }
+
+  function updateGridTexture() {
+    // 网格画布提升到 4096 宽，保证放大不糊
+    const cimg = renderGridEquirect(4096, 2048, gridSteps[gridIndex]);
+    const tex = new THREE.CanvasTexture(cimg);
+    if (THREE.sRGBEncoding) tex.encoding = THREE.sRGBEncoding;
+    tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+    if (gridMat.map) gridMat.map.dispose();
+    gridMat.map = tex;
+    gridMat.needsUpdate = true;
+    earthGrid.visible = showGrid;
+  }
+
+  updateBaseTexture();
+  updateGridTexture();
+
+  let zoom = 1, baseZ = 3;
+  function updateCam() {
+    const tanV = Math.tan(FOV * Math.PI / 360);
+    const aspect = camera.aspect || 1;
+    baseZ = Math.max(R / tanV, R / (tanV * aspect)) / 0.82;
+    let dist = baseZ * zoom;
+    
+    // 限制极近距离，不允许穿模
+    const minDist = R * 1.02; 
+    if (dist < minDist) dist = minDist;
+    camera.position.set(0, 0, dist);
+  }
+
+  const pointers = new Map();
+  let isDragging = false, pX = 0, pY = 0, pTime = 0, vX = 0, vY = 0;
+  let pinchDist = 0, pinchZoom = 1, resetting = false;
+
+  function dragBy(dx, dy) {
+    const len = Math.hypot(dx, dy);
+    if (len < 0.1) return;
+    const axis = new THREE.Vector3(dy, dx, 0).normalize();
+    const q = new THREE.Quaternion().setFromAxisAngle(axis, len * 0.005);
+    earthBase.quaternion.premultiply(q);
+    earthGrid.quaternion.premultiply(q);
+  }
+
+  canvas.addEventListener('pointerdown', (e) => {
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    canvas.setPointerCapture(e.pointerId);
+    if (pointers.size === 1) {
+      isDragging = true; resetting = false; vX = 0; vY = 0;
+      pX = e.clientX; pY = e.clientY; pTime = performance.now();
+    } else if (pointers.size === 2) {
+      isDragging = false; 
+      const [a, b] = [...pointers.values()];
+      pinchDist = Math.hypot(a.x - b.x, a.y - b.y);
+      pinchZoom = zoom;
+    }
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    if (!pointers.has(e.pointerId)) return;
+    pointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      const d = Math.hypot(a.x - b.x, a.y - b.y);
+      if (pinchDist > 0 && d > 0) {
+        zoom = clamp(pinchZoom * (pinchDist / d), 0.12, 4.0);
+        updateCam();
+      }
+      return;
+    }
+    if (!isDragging) return;
+    const now = performance.now();
+    let dt = Math.max(1, now - pTime) / 1000;
+    dt = Math.max(dt, 0.016); 
+    const dx = e.clientX - pX, dy = e.clientY - pY;
+    if (Math.hypot(dx, dy) < 100) { vX = dx / dt; vY = dy / dt; }
+    pX = e.clientX; pY = e.clientY; pTime = now;
+    dragBy(dx, dy);
+  });
+
+  function onUp(e) {
+    pointers.delete(e.pointerId);
+    canvas.releasePointerCapture(e.pointerId);
+    if (pointers.size === 1) {
+      const [p] = [...pointers.values()];
+      pX = p.x; pY = p.y; pTime = performance.now();
+      vX = 0; vY = 0; isDragging = true;
+    } else if (pointers.size === 0) isDragging = false;
+  }
+  canvas.addEventListener('pointerup', onUp);
+  canvas.addEventListener('pointercancel', onUp);
+
+  canvas.addEventListener('wheel', (e) => {
+    e.preventDefault();
+    zoom = clamp(zoom * (1 + e.deltaY * 0.0015), 0.12, 4.0);
+    updateCam();
+  }, { passive: false });
+
+  canvas.addEventListener('dblclick', () => { resetting = true; vX = 0; vY = 0; });
+
+  let lastT = performance.now();
+  function tick(now) {
+    const dt = Math.min(0.05, (now - lastT) / 1000);
+    lastT = now;
+    if (!isDragging) {
+      if (resetting) {
+        const t = 1 - Math.pow(0.001, dt);
+        earthBase.quaternion.slerp(HOME, t);
+        earthGrid.quaternion.slerp(HOME, t);
+        if (earthBase.quaternion.angleTo(HOME) < 0.001) { 
+          earthBase.quaternion.copy(HOME); earthGrid.quaternion.copy(HOME); resetting = false; 
+        }
+      } else if (Math.hypot(vX, vY) > 5) {
+        const maxV = 600, speed = Math.hypot(vX, vY);
+        if (speed > maxV) { vX = (vX / speed) * maxV; vY = (vY / speed) * maxV; }
+        dragBy(vX * dt, vY * dt);
+        const decay = Math.exp(-4 * dt);
+        vX *= decay; vY *= decay;
+      }
+    }
+    renderer.render(scene, camera);
+    requestAnimationFrame(tick);
+  }
+  requestAnimationFrame(tick);
+
+  function resize() {
+    const w = canvas.clientWidth || window.innerWidth;
+    const h = canvas.clientHeight || window.innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    updateCam();
+  }
+  new ResizeObserver(resize).observe(canvas);
+  resize();
+
+  document.getElementById('fileInput').addEventListener('change', function(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const url = URL.createObjectURL(file);
+    new THREE.TextureLoader().load(url, (tex) => {
+      tex.anisotropy = renderer.capabilities.getMaxAnisotropy();
+      if (THREE.sRGBEncoding) tex.encoding = THREE.sRGBEncoding; 
+      if (matBasic.map) matBasic.map.dispose();
+      if (matPhong.map) matPhong.map.dispose();
+      matBasic.map = tex; matPhong.map = tex;
+      matBasic.needsUpdate = true; matPhong.needsUpdate = true;
+      URL.revokeObjectURL(url);
+      currentLayer = 'custom';
+      document.querySelectorAll('.layer-btn').forEach(b => b.classList.remove('is-on'));
+    }, undefined, () => alert('图片读取失败'));
+    this.value = ''; 
+  });
+
+  document.getElementById('gridToggle').onclick = function() {
+    showGrid = !showGrid;
+    this.classList.toggle('is-on', showGrid);
+    earthGrid.visible = showGrid;
+  };
+
+  document.getElementById('gridResBtn').onclick = function() {
+    gridIndex = (gridIndex + 1) % gridSteps.length;
+    this.textContent = '网格 ' + gridSteps[gridIndex] + '°';
+    updateGridTexture();
+  };
+
+  document.getElementById('lightBtn').onclick = function() {
+    useLight = !useLight;
+    this.classList.toggle('is-on', useLight);
+    earthBase.material = useLight ? matPhong : matBasic;
+  };
+
+  const DATA_URLS = {
+    coast: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/v5.1.2/geojson/ne_110m_coastline.geojson',
+    land: 'https://raw.githubusercontent.com/nvkelso/natural-earth-vector/master/geojson/ne_110m_land.geojson'
+  };
+
+  document.querySelectorAll('.layer-btn').forEach(btn => {
+    btn.addEventListener('click', async () => {
+      const mode = btn.dataset.layer;
+      if (mode === 'default') {
+        currentLayer = 'default'; updateBaseTexture();
+        document.querySelectorAll('.layer-btn').forEach(b => b.classList.remove('is-on'));
+        btn.classList.add('is-on');
+        return;
+      }
+      if (cache[mode]) { 
+        currentLayer = mode; updateBaseTexture();
+        document.querySelectorAll('.layer-btn').forEach(b => b.classList.remove('is-on'));
+        btn.classList.add('is-on');
+        return; 
+      }
+      const oldText = btn.textContent; btn.textContent = '...';
+      try {
+        const res = await fetch(DATA_URLS[mode]);
+        if (!res.ok) throw new Error('网络错误');
+        const gj = await res.json();
+        cache[mode] = gj;
+        currentLayer = mode; updateBaseTexture();
+        document.querySelectorAll('.layer-btn').forEach(b => b.classList.remove('is-on'));
+        btn.classList.add('is-on');
+      } catch (err) {
+        // 直接展示在屏幕上，防手机弹窗
+        errBox.style.display = 'block';
+        errBox.innerHTML = '<b>本地协议拦截了网络请求</b><br>手机直接打开本地文件时，浏览器禁止获取在线数据。<br><br><b>如何解决：</b><br>1. 请点击下方的【导出】按钮，生成一张自带陆地的图片。<br>2. 点击【导入贴图】，选择那张图片。即可完全离线查看！<br><br><button onclick="document.getElementById(\'error-box\').style.display=\'none\'" style="margin-top:10px;padding:6px 12px;border:0;border-radius:4px;background:#fff;color:#c83232;font-weight:bold;">我知道了</button>';
+      } finally { 
+        btn.textContent = oldText; 
+      }
+    });
+  });
+
+  const exportModal = document.getElementById('exportModal');
+  const expW = document.getElementById('expW');
+  const expH = document.getElementById('expH');
+  
+  document.getElementById('exportBtn').onclick = () => {
+    exportModal.hidden = false; expH.value = Math.round(expW.value / 2);
+  };
+  document.getElementById('emCancel').onclick = () => exportModal.hidden = true;
+  expW.oninput = () => { expH.value = Math.round(expW.value / 2); };
+  document.querySelectorAll('.presets button').forEach(b => {
+    b.onclick = () => { expW.value = b.dataset.w; expH.value = b.dataset.h; };
+  });
+
+  document.getElementById('emExport').onclick = async () => {
+    const W = clamp(parseInt(expW.value) || 4096, 512, 16384);
+    const H = clamp(parseInt(expH.value) || 2048, 256, 8192);
+    const withGrid = document.getElementById('expGrid').checked;
+    const btn = document.getElementById('emExport');
+    
+    btn.textContent = '渲染中...'; btn.disabled = true;
+    setTimeout(() => {
+      const c = document.createElement('canvas');
+      c.width = W; c.height = H;
+      const ctx = c.getContext('2d');
+      
+      if (currentLayer === 'custom' && matBasic.map && matBasic.map.image) {
+        ctx.drawImage(matBasic.map.image, 0, 0, W, H);
+      } else {
+        const gj = currentLayer === 'default' ? null : cache[currentLayer];
+        const baseC = renderBaseEquirect(gj, W, H, currentLayer);
+        ctx.drawImage(baseC, 0, 0);
+      }
+      
+      if (withGrid) {
+        const gridC = renderGridEquirect(W, H, gridSteps[gridIndex]);
+        ctx.drawImage(gridC, 0, 0);
+      }
+
+      c.toBlob(blob => {
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = `earth-${currentLayer}-${W}x${H}.png`;
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 3000);
+        btn.textContent = '下载 PNG'; btn.disabled = false; exportModal.hidden = true;
+      }, 'image/png');
+    }, 50);
+  };
+
+  document.getElementById('homeBtn').onclick = () => { resetting = true; vX = 0; vY = 0; };
+})();
+</script>
+</body>
+</html>
